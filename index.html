@@ -1,0 +1,565 @@
+<!doctype html>
+<html lang="ja">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover" />
+  <title>Brick Breaker - Happy New Year 2026</title>
+  <style>
+    html, body {
+      margin: 0;
+      height: 100%;
+      background: #0b0b0f;
+      color: #fff;
+      overflow: hidden;
+      font-family: system-ui, -apple-system, Segoe UI, Roboto, "Hiragino Kaku Gothic ProN", "Noto Sans JP", sans-serif;
+    }
+    #wrap {
+      position: relative;
+      width: 100%;
+      height: 100%;
+      touch-action: none; /* mobile: prevent scroll while playing */
+    }
+    canvas {
+      width: 100%;
+      height: 100%;
+      display: block;
+    }
+    .hud {
+      position: absolute;
+      left: 12px;
+      top: 12px;
+      display: flex;
+      gap: 10px;
+      align-items: center;
+      background: rgba(0,0,0,.35);
+      backdrop-filter: blur(6px);
+      padding: 8px 10px;
+      border-radius: 12px;
+      font-size: 14px;
+      user-select: none;
+      -webkit-user-select: none;
+    }
+    .btn {
+      border: 1px solid rgba(255,255,255,.25);
+      background: rgba(255,255,255,.08);
+      color: #fff;
+      padding: 6px 10px;
+      border-radius: 10px;
+      font-size: 13px;
+    }
+    .overlay {
+      position: absolute;
+      inset: 0;
+      display: grid;
+      place-items: center;
+      pointer-events: none;
+    }
+    .card {
+      pointer-events: none;
+      text-align: center;
+      max-width: min(520px, 92vw);
+      padding: 18px 18px;
+      border-radius: 18px;
+      background: rgba(0,0,0,.45);
+      border: 1px solid rgba(255,255,255,.18);
+      backdrop-filter: blur(10px);
+      box-shadow: 0 10px 40px rgba(0,0,0,.35);
+    }
+    .title {
+      font-size: clamp(22px, 4vw, 34px);
+      font-weight: 800;
+      letter-spacing: .02em;
+      margin: 0 0 8px;
+    }
+    .sub {
+      margin: 0;
+      opacity: .9;
+      font-size: clamp(13px, 2.4vw, 16px);
+      line-height: 1.6;
+    }
+    .hint {
+      margin-top: 10px;
+      opacity: .85;
+      font-size: clamp(12px, 2.2vw, 14px);
+    }
+    .hny {
+      font-size: clamp(34px, 6.5vw, 62px);
+      font-weight: 900;
+      letter-spacing: .03em;
+      text-shadow: 0 8px 40px rgba(0,0,0,.6);
+      margin: 0;
+    }
+    .small {
+      opacity: .9;
+      font-size: clamp(12px, 2.2vw, 14px);
+      margin: 10px 0 0;
+    }
+  </style>
+</head>
+
+<body>
+<div id="wrap">
+  <canvas id="c"></canvas>
+
+  <div class="hud">
+    <span id="status">READY</span>
+    <span>Score: <b id="score">0</b></span>
+    <span>Lives: <b id="lives">3</b></span>
+    <button class="btn" id="restart" type="button">Restart</button>
+  </div>
+
+  <div class="overlay" id="overlay">
+    <div class="card" id="card">
+      <p class="title" id="overlayTitle">Brick Breaker</p>
+      <p class="sub" id="overlaySub">
+        ブロックを全部壊すとメッセージが出ます。<br/>
+        <b>PC:</b> マウス移動 / クリックで開始 &nbsp;|&nbsp;
+        <b>スマホ:</b> 指で左右にスライド / タップで開始
+      </p>
+      <p class="hint" id="overlayHint">Tap / Click to start</p>
+    </div>
+  </div>
+</div>
+
+<script>
+(() => {
+  const canvas = document.getElementById('c');
+  const ctx = canvas.getContext('2d', { alpha: false });
+  const wrap = document.getElementById('wrap');
+
+  const statusEl = document.getElementById('status');
+  const scoreEl = document.getElementById('score');
+  const livesEl = document.getElementById('lives');
+  const restartBtn = document.getElementById('restart');
+
+  const overlay = document.getElementById('overlay');
+  const overlayTitle = document.getElementById('overlayTitle');
+  const overlaySub = document.getElementById('overlaySub');
+  const overlayHint = document.getElementById('overlayHint');
+
+  // Background image (put bg.png next to this index.html)
+  const bg = new Image();
+  bg.src = './bg.png';
+
+  // --- Game state ---
+  let W = 0, H = 0, dpr = 1;
+
+  const state = {
+    running: false,
+    started: false,
+    won: false,
+    score: 0,
+    lives: 3,
+    lastTime: 0,
+    inputX: 0.5,  // normalized [0..1]
+  };
+
+  const paddle = {
+    w: 140,
+    h: 14,
+    x: 0,
+    y: 0,
+    speed: 900
+  };
+
+  const ball = {
+    r: 8,
+    x: 0,
+    y: 0,
+    vx: 260,
+    vy: -420,
+    stuck: true
+  };
+
+  const bricks = {
+    rows: 3,
+    cols: 4,
+    gap: 8,
+    top: 80,
+    side: 24,
+    h: 22,
+    list: []
+  };
+
+  function clamp(v, a, b){ return Math.max(a, Math.min(b, v)); }
+
+  function resize() {
+    dpr = Math.max(1, Math.min(2, window.devicePixelRatio || 1));
+    W = Math.floor(wrap.clientWidth);
+    H = Math.floor(wrap.clientHeight);
+    canvas.width = Math.floor(W * dpr);
+    canvas.height = Math.floor(H * dpr);
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+
+    // Scale gameplay sizes based on screen
+    const base = Math.min(W, H);
+    paddle.w = clamp(base * 0.22, 110, 190);
+    paddle.h = clamp(base * 0.018, 12, 18);
+    ball.r = clamp(base * 0.012, 7, 11);
+
+    paddle.y = H - 54;
+    paddle.x = W * state.inputX - paddle.w / 2;
+    paddle.x = clamp(paddle.x, 12, W - 12 - paddle.w);
+
+    resetBall(true);
+    layoutBricks();
+  }
+
+  function layoutBricks() {
+    bricks.side = clamp(W * 0.04, 14, 28);
+    bricks.gap = clamp(W * 0.012, 6, 12);
+    bricks.top = clamp(H * 0.12, 68, 110);
+    bricks.h = clamp(H * 0.035, 18, 30);
+
+    const usableW = W - bricks.side * 2;
+    const totalGap = bricks.gap * (bricks.cols - 1);
+    const bw = (usableW - totalGap) / bricks.cols;
+
+    bricks.list = [];
+    for (let r = 0; r < bricks.rows; r++) {
+      for (let c = 0; c < bricks.cols; c++) {
+        const x = bricks.side + c * (bw + bricks.gap);
+        const y = bricks.top + r * (bricks.h + bricks.gap);
+        // Make a "mask" pattern so you can see the background in gaps and after breaking.
+        // Give some bricks "toughness" for variation.
+        const hp = (r === 0) ? 2 : 1;
+        bricks.list.push({ x, y, w: bw, h: bricks.h, alive: true, hp });
+      }
+    }
+  }
+
+  function resetBall(stuck = true) {
+    ball.stuck = stuck;
+    ball.x = paddle.x + paddle.w / 2;
+    ball.y = paddle.y - ball.r - 2;
+    // Give slight randomized direction each reset
+    const angle = (-Math.PI / 2) + (Math.random() * 0.5 - 0.25);
+    const speed = clamp(Math.min(W, H) * 0.65, 520, 820);
+    ball.vx = Math.cos(angle) * speed;
+    ball.vy = Math.sin(angle) * speed;
+  }
+
+  function resetAll() {
+    state.running = false;
+    state.started = false;
+    state.won = false;
+    state.score = 0;
+    state.lives = 3;
+    scoreEl.textContent = state.score;
+    livesEl.textContent = state.lives;
+    statusEl.textContent = "READY";
+    overlay.style.display = "grid";
+    overlayTitle.textContent = "Brick Breaker";
+    overlaySub.innerHTML =
+      "ブロックを全部壊すとメッセージが出ます。<br/>" +
+      "<b>PC:</b> マウス移動 / クリックで開始 &nbsp;|&nbsp; " +
+      "<b>スマホ:</b> 指で左右にスライド / タップで開始";
+    overlayHint.textContent = "Tap / Click to start";
+    layoutBricks();
+    resetBall(true);
+  }
+
+  function start() {
+    if (state.won) return;
+    state.running = true;
+    state.started = true;
+    ball.stuck = false;
+    overlay.style.display = "none";
+    statusEl.textContent = "PLAY";
+  }
+
+  // --- Input ---
+  function setInputFromClientX(clientX) {
+    const rect = wrap.getBoundingClientRect();
+    const x = (clientX - rect.left) / rect.width;
+    state.inputX = clamp(x, 0, 1);
+  }
+
+  wrap.addEventListener('mousemove', (e) => setInputFromClientX(e.clientX));
+  wrap.addEventListener('touchstart', (e) => {
+    if (e.touches && e.touches[0]) setInputFromClientX(e.touches[0].clientX);
+  }, { passive: true });
+  wrap.addEventListener('touchmove', (e) => {
+    if (e.touches && e.touches[0]) setInputFromClientX(e.touches[0].clientX);
+  }, { passive: true });
+
+  wrap.addEventListener('click', () => {
+    if (!state.started) start();
+    else if (!state.running && !state.won) start();
+  });
+
+  wrap.addEventListener('touchend', () => {
+    if (!state.started) start();
+    else if (!state.running && !state.won) start();
+  });
+
+  restartBtn.addEventListener('click', () => resetAll());
+
+  window.addEventListener('resize', resize);
+
+  // --- Collision helpers ---
+  function circleRectCollide(cx, cy, cr, rx, ry, rw, rh) {
+    const closestX = clamp(cx, rx, rx + rw);
+    const closestY = clamp(cy, ry, ry + rh);
+    const dx = cx - closestX;
+    const dy = cy - closestY;
+    return (dx * dx + dy * dy) <= cr * cr;
+  }
+
+  // --- Update ---
+  function update(dt) {
+    // Paddle follows input smoothly
+    const targetX = clamp(W * state.inputX - paddle.w / 2, 12, W - 12 - paddle.w);
+    const maxMove = paddle.speed * dt;
+    const dx = targetX - paddle.x;
+    paddle.x += clamp(dx, -maxMove, maxMove);
+
+    if (ball.stuck) {
+      ball.x = paddle.x + paddle.w / 2;
+      ball.y = paddle.y - ball.r - 2;
+      return;
+    }
+
+    // Ball motion
+    ball.x += ball.vx * dt;
+    ball.y += ball.vy * dt;
+
+    // Wall collisions
+    if (ball.x - ball.r < 0) { ball.x = ball.r; ball.vx *= -1; }
+    if (ball.x + ball.r > W) { ball.x = W - ball.r; ball.vx *= -1; }
+    if (ball.y - ball.r < 0) { ball.y = ball.r; ball.vy *= -1; }
+
+    // Bottom: lose life
+    if (ball.y - ball.r > H) {
+      state.lives -= 1;
+      livesEl.textContent = state.lives;
+      if (state.lives <= 0) {
+        state.running = false;
+        statusEl.textContent = "GAME OVER";
+        overlay.style.display = "grid";
+        overlayTitle.textContent = "GAME OVER";
+        overlaySub.innerHTML = "クリック / タップで再開（同じステージ）";
+        overlayHint.textContent = "Tap / Click to continue";
+        // Reset stage but keep it feeling like retry:
+        state.lives = 3;
+        livesEl.textContent = state.lives;
+        state.score = 0;
+        scoreEl.textContent = state.score;
+        layoutBricks();
+      }
+      resetBall(true);
+      state.running = false;
+      state.started = false;
+      return;
+    }
+
+    // Paddle collision
+    const prx = paddle.x, pry = paddle.y, prw = paddle.w, prh = paddle.h;
+    if (circleRectCollide(ball.x, ball.y, ball.r, prx, pry, prw, prh) && ball.vy > 0) {
+      // Reflect based on hit position
+      const hit = (ball.x - (paddle.x + paddle.w/2)) / (paddle.w/2);
+      const angle = hit * (Math.PI * 0.33); // max ~60deg
+      const speed = Math.hypot(ball.vx, ball.vy);
+      ball.vx = Math.sin(angle) * speed;
+      ball.vy = -Math.cos(angle) * speed;
+      // Nudge above paddle
+      ball.y = paddle.y - ball.r - 1;
+    }
+
+    // Brick collisions
+    let aliveCount = 0;
+    for (const b of bricks.list) {
+      if (!b.alive) continue;
+      aliveCount++;
+      if (circleRectCollide(ball.x, ball.y, ball.r, b.x, b.y, b.w, b.h)) {
+        // Simple reflection: flip axis depending on penetration
+        const prevX = ball.x - ball.vx * dt;
+        const prevY = ball.y - ball.vy * dt;
+
+        const wasLeft = prevX < b.x;
+        const wasRight = prevX > b.x + b.w;
+        const wasAbove = prevY < b.y;
+        const wasBelow = prevY > b.y + b.h;
+
+        if ((wasLeft && !wasAbove && !wasBelow) || (wasRight && !wasAbove && !wasBelow)) {
+          ball.vx *= -1;
+        } else {
+          ball.vy *= -1;
+        }
+
+        b.hp -= 1;
+        if (b.hp <= 0) {
+          b.alive = false;
+          state.score += 10;
+          scoreEl.textContent = state.score;
+        } else {
+          state.score += 5;
+          scoreEl.textContent = state.score;
+        }
+        break;
+      }
+    }
+
+    // Win condition
+    if (aliveCount === 0 && !state.won) {
+      state.won = true;
+      state.running = false;
+      statusEl.textContent = "CLEAR!";
+      showWinOverlay();
+    }
+  }
+
+  function showWinOverlay() {
+    overlay.style.display = "grid";
+    overlayTitle.textContent = "";
+    overlaySub.innerHTML = "";
+    overlayHint.textContent = "Tap / Click to restart";
+
+    // Replace card content with big message
+    const card = document.getElementById('card');
+    card.innerHTML = `
+      <p class="hny">Happy New Year 2026</p>
+      <p class="small">Tap / Click to play again</p>
+    `;
+
+    // Allow restart on click/tap
+    const restartHandler = () => {
+      card.innerHTML = `
+        <p class="title" id="overlayTitle">Brick Breaker</p>
+        <p class="sub" id="overlaySub">
+          ブロックを全部壊すとメッセージが出ます。<br/>
+          <b>PC:</b> マウス移動 / クリックで開始 &nbsp;|&nbsp;
+          <b>スマホ:</b> 指で左右にスライド / タップで開始
+        </p>
+        <p class="hint" id="overlayHint">Tap / Click to start</p>
+      `;
+      wrap.removeEventListener('click', restartHandler);
+      wrap.removeEventListener('touchend', restartHandler);
+      resetAll();
+    };
+
+    wrap.addEventListener('click', restartHandler, { once: true });
+    wrap.addEventListener('touchend', restartHandler, { once: true });
+  }
+
+  // --- Render ---
+  function drawBackground() {
+    // Fill with dark base
+    ctx.fillStyle = '#0b0b0f';
+    ctx.fillRect(0, 0, W, H);
+
+    // Draw background image as "cover"
+    if (bg.complete && bg.naturalWidth > 0) {
+      const iw = bg.naturalWidth, ih = bg.naturalHeight;
+      const scale = Math.max(W / iw, H / ih);
+      const dw = iw * scale, dh = ih * scale;
+      const dx = (W - dw) / 2;
+      const dy = (H - dh) / 2;
+      ctx.drawImage(bg, dx, dy, dw, dh);
+
+      // Add dim overlay for readability
+      ctx.fillStyle = 'rgba(0,0,0,0.22)';
+      ctx.fillRect(0, 0, W, H);
+    } else {
+      // Fallback: simple gradient
+      const g = ctx.createLinearGradient(0, 0, 0, H);
+      g.addColorStop(0, '#1a1a24');
+      g.addColorStop(1, '#0b0b0f');
+      ctx.fillStyle = g;
+      ctx.fillRect(0, 0, W, H);
+    }
+  }
+
+  function drawBricks() {
+    for (const b of bricks.list) {
+      if (!b.alive) continue;
+      // Semi-transparent "cover" so the bg becomes visible as you break bricks
+      ctx.fillStyle = (b.hp >= 2) ? 'rgba(255,255,255,0.40)' : 'rgba(255,255,255,0.28)';
+      roundRect(ctx, b.x, b.y, b.w, b.h, 8);
+      ctx.fill();
+
+      // small highlight
+      ctx.strokeStyle = 'rgba(255,255,255,0.18)';
+      ctx.lineWidth = 1;
+      roundRect(ctx, b.x + 1, b.y + 1, b.w - 2, b.h - 2, 7);
+      ctx.stroke();
+    }
+  }
+
+  function drawPaddle() {
+    ctx.fillStyle = 'rgba(255,255,255,0.85)';
+    roundRect(ctx, paddle.x, paddle.y, paddle.w, paddle.h, 10);
+    ctx.fill();
+
+    ctx.fillStyle = 'rgba(0,0,0,0.15)';
+    roundRect(ctx, paddle.x, paddle.y + 2, paddle.w, paddle.h - 2, 10);
+    ctx.fill();
+  }
+
+  function drawBall() {
+    // subtle shadow
+    ctx.beginPath();
+    ctx.arc(ball.x + 2, ball.y + 3, ball.r, 0, Math.PI * 2);
+    ctx.fillStyle = 'rgba(0,0,0,0.25)';
+    ctx.fill();
+
+    ctx.beginPath();
+    ctx.arc(ball.x, ball.y, ball.r, 0, Math.PI * 2);
+    ctx.fillStyle = 'rgba(255,255,255,0.95)';
+    ctx.fill();
+  }
+
+  function drawGuide() {
+    if (!state.started && !state.won) {
+      // A little "aim line"
+      ctx.strokeStyle = 'rgba(255,255,255,0.25)';
+      ctx.lineWidth = 2;
+      ctx.setLineDash([6, 8]);
+      ctx.beginPath();
+      ctx.moveTo(ball.x, ball.y);
+      ctx.lineTo(ball.x, ball.y - 120);
+      ctx.stroke();
+      ctx.setLineDash([]);
+    }
+  }
+
+  function roundRect(ctx, x, y, w, h, r) {
+    r = Math.min(r, w/2, h/2);
+    ctx.beginPath();
+    ctx.moveTo(x+r, y);
+    ctx.arcTo(x+w, y, x+w, y+h, r);
+    ctx.arcTo(x+w, y+h, x, y+h, r);
+    ctx.arcTo(x, y+h, x, y, r);
+    ctx.arcTo(x, y, x+w, y, r);
+    ctx.closePath();
+  }
+
+  function render() {
+    drawBackground();
+    drawBricks();
+    drawPaddle();
+    drawBall();
+    drawGuide();
+  }
+
+  // --- Loop ---
+  function loop(t) {
+    const time = t / 1000;
+    const dt = Math.min(1/30, time - (state.lastTime || time));
+    state.lastTime = time;
+
+    if (state.running) update(dt);
+    render();
+
+    requestAnimationFrame(loop);
+  }
+
+  // init
+  bg.onload = () => render();
+  resize();
+  resetAll();
+  requestAnimationFrame(loop);
+})();
+</script>
+</body>
+</html>
